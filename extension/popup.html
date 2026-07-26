@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>video2project Capture</title>
+  <style>
+    body { font: 13px/1.5 system-ui, sans-serif; width: 300px; margin: 0; padding: 14px; }
+    h1 { font-size: 14px; margin: 0 0 10px; }
+    button {
+      width: 100%; padding: 9px; border: 0; border-radius: 6px;
+      background: #c00; color: #fff; font-weight: 600; cursor: pointer;
+    }
+    button:disabled { background: #999; cursor: default; }
+    #status {
+      margin-top: 10px; padding: 8px; border-radius: 6px; background: #f2f2f2;
+      white-space: pre-wrap; word-break: break-word; min-height: 18px;
+    }
+    .hint { color: #666; font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>video2project Capture</h1>
+  <button id="run">Analyze this video</button>
+  <div id="status">idle</div>
+  <div class="hint">
+    Requires the local server: run <code>video2project capture</code> first.
+    Audio records in real time (the video plays through), then frames are
+    captured. Keep this tab open until done.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -304,6 +304,18 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capture(args: argparse.Namespace) -> int:
+    """Start the browser-capture ingest server (extension POSTs audio/frames)."""
+    from . import ingest_server
+
+    try:
+        ingest_server.serve(port=args.port)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 # ── helpers ────────────────────────────────────────────────────────
 
 
@@ -361,6 +373,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("doctor", help="Sanity-check ffmpeg, env, output dir")
     sp.set_defaults(func=cmd_doctor)
 
+    # `capture` — browser-capture ingest server
+    sp = sub.add_parser("capture", help="Start ingest server for the browser extension")
+    sp.add_argument("--port", type=int, default=8765)
+    sp.set_defaults(func=cmd_capture)
+
     return p
 
 
@@ -371,7 +388,15 @@ def main(argv: list[str] | None = None) -> int:
     # No subcommand: treat first arg as a URL → auto-chain
     if argv and argv[0] not in {"-h", "--help"} and not argv[0].startswith("-"):
         # If it looks like a subcommand, defer to argparse; else treat as URL
-        if argv[0] in {"ingest", "extract", "finalize", "review", "list", "doctor"}:
+        if argv[0] in {
+            "ingest",
+            "extract",
+            "finalize",
+            "review",
+            "list",
+            "doctor",
+            "capture",
+        }:
             pass
         else:
             ns = argparse.Namespace(url=argv[0], force=False)

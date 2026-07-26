@@ -18,6 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Browser-capture pipeline (Whisper transcription + PaddleOCR). Optional so the
+# base yt-dlp path stays lightweight; install with: pip install -e ".[capture]"
+capture = [
+    "faster-whisper>=1.0.0",
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.6.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-mock>=3.12.0",
