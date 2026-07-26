@@ -23,7 +23,7 @@ dependencies = [
 capture = [
     "faster-whisper>=1.0.0",
     "paddleocr>=2.7.0",
-    "paddlepaddle>=2.6.0",
+    "paddlepaddle==3.2.2",  # 3.3.1 has a OneDNN/PIR crash on some CPUs
 ]
 dev = [
     "pytest>=8.0.0",

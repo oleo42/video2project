@@ -51,22 +51,33 @@ def ocr_frame(frame_path: Path) -> dict[str, Any]:
         raise RuntimeError(f"frame not found: {frame_path}")
 
     engine = _load_engine()
-    result = engine.ocr(str(frame_path), cls=True)
-
+    # PaddleOCR 3.x .ocr(): no cls kwarg; angle classification is built in.
+    result = engine.ocr(str(frame_path))
     texts: list[str] = []
     scores: list[float] = []
-    # PaddleOCR returns [ [ [box, (text, score)], ... ] ] per image
-    for page in result or []:
-        for line in page or []:
-            try:
-                _box, (text, score) = line
-            except (ValueError, TypeError):
-                continue
-            text = (text or "").strip()
-            if not text:
-                continue
-            texts.append(text)
-            scores.append(float(score))
+    # PaddleOCR 3.x returns a list of result dicts with rec_texts / rec_scores.
+    # (Older 2.x returned nested [box, (text, score)] lists; we target 3.x.)
+    for res in result or []:
+        if hasattr(res, "get"):
+            for text, score in zip(
+                res.get("rec_texts") or [], res.get("rec_scores") or []
+            ):
+                text = (text or "").strip()
+                if not text:
+                    continue
+                texts.append(text)
+                scores.append(float(score))
+        else:
+            # Defensive: tolerate the legacy nested-box shape if encountered.
+            for line in res or []:
+                try:
+                    _box, (text, score) = line
+                except (ValueError, TypeError):
+                    continue
+                text = (text or "").strip()
+                if text:
+                    texts.append(text)
+                    scores.append(float(score))
 
     confidence = round(sum(scores) / len(scores), 4) if scores else 0.0
     has_text = bool(texts)
