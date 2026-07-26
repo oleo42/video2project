@@ -233,6 +233,41 @@
 
   // ── messages from popup/background ────────────────────────────────
 
+  // Manual-mark relay: the review page (a DIFFERENT document on localhost:8765)
+  // POSTs a mark *request* to the server; we poll the server for pending marks
+  // while our YouTube tab is open, capture the frame, and POST the result to
+  // /api/mark/complete. (A DOM CustomEvent can't cross documents, so the server
+  // mediates the hand-off.)
+  const MARK_POLL_MS = 2000;
+  async function pollMarks() {
+    try {
+      const r = await fetch(SERVER + "/api/mark/pending");
+      if (!r.ok) return;
+      const data = await r.json().catch(() => ({}));
+      const pend = (data && data.pending) || [];
+      for (const mark of pend) {
+        const ts = mark.timestamp_s;
+        const video = getVideo();
+        if (ts == null || !video) continue;
+        try {
+          const wasPaused = video.paused;
+          if (!wasPaused) { try { video.pause(); } catch (e) {} }
+          const image_b64 = await captureFrameAt(video, ts);
+          await fetch(SERVER + "/api/mark/complete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: mark.id, timestamp_s: ts, image_b64 }),
+          });
+        } catch (e) {
+          console.warn("v2p manual frame capture failed", e);
+        }
+      }
+    } catch (e) {
+      /* server down; stay quiet and retry next tick */
+    }
+  }
+  setInterval(pollMarks, MARK_POLL_MS);
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === "v2p-run") {
       runCapture().then(sendResponse);

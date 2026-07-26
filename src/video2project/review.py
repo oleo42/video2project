@@ -23,6 +23,33 @@ from pathlib import Path
 
 from .paths import REVIEW_HOST, REVIEW_PORT
 
+# ── manual-mark queue (review page ⇄ extension hand-off) ───────────
+# The review page and the extension are different documents, so they can't talk
+# directly. The review page queues a mark here; the extension polls for pending
+# marks, captures the frame on its YouTube tab, and completes it.
+_PENDING_LOCK = threading.Lock()
+_PENDING_MARKS: list[dict[str, Any]] = []
+_MARK_SEQ = [0]
+
+
+def _push_pending_mark(timestamp_s: float) -> dict[str, Any]:
+    with _PENDING_LOCK:
+        _MARK_SEQ[0] += 1
+        mark = {"id": _MARK_SEQ[0], "timestamp_s": timestamp_s}
+        _PENDING_MARKS.append(mark)
+        return mark
+
+
+def _pop_pending_marks(*, peek: bool = False, mark_id: Any = None) -> list[dict]:
+    """List pending marks (peek) or remove one by id. Returns the list."""
+    with _PENDING_LOCK:
+        if mark_id is not None:
+            removed = [m for m in _PENDING_MARKS if m["id"] == mark_id]
+            _PENDING_MARKS[:] = [m for m in _PENDING_MARKS if m["id"] != mark_id]
+            return removed
+        return list(_PENDING_MARKS)
+
+
 # ── HTML template ───────────────────────────────────────────────────
 _REVIEW_HTML = """<!doctype html>
 <html lang="en">
@@ -85,6 +112,13 @@ _REVIEW_HTML = """<!doctype html>
 
   <section>
     <h2>Frame candidates ({n_candidates})</h2>
+    <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+      <input id="markTs" type="number" step="0.1" min="0" placeholder="seconds (e.g. 83.5)"
+        style="background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;width:160px" />
+      <button class="secondary" onclick="addMark()"
+        style="background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px 12px;cursor:pointer">+ Mark timestamp</button>
+      <span class="status" id="markStatus"></span>
+    </div>
     <div class="grid" id="frames"></div>
   </section>
 
@@ -113,9 +147,14 @@ function renderFrames() {{
     const ts = c.timestamp_s || 0;
     const mm = Math.floor(ts/60), ss = Math.floor(ts%60);
     const imgPath = c.frame_path || ('frames/frame_' + String(c.index).padStart(4,'0') + '.png');
+    const needsHuman = c.needs_human ? ' <span style="color:var(--warn)">⚠ check OCR</span>' : '';
+    const ocrBlock = (c.ocr_text && c.ocr_text.trim())
+      ? `<div style="padding:6px 10px;font-size:11px;color:var(--muted);border-top:1px solid var(--border);white-space:pre-wrap;max-height:80px;overflow-y:auto">${{escape(c.ocr_text)}}</div>`
+      : '';
     card.innerHTML = `
       <img src="${{imgPath}}" onerror="this.style.background='#333';this.alt='(missing)'" />
-      <div class="meta"><span class="ts">${{String(mm).padStart(2,'0')}}:${{String(ss).padStart(2,'0')}}</span><span>frame #${{c.index}}</span></div>
+      <div class="meta"><span class="ts">${{String(mm).padStart(2,'0')}}:${{String(ss).padStart(2,'0')}}</span><span>frame #${{c.index}}${{needsHuman}}</span></div>
+      ${{ocrBlock}}
       <div class="actions">
         <button class="toggle" onclick="toggleFrame(${{i}})">${{c.accepted ? 'accepted' : 'rejected'}}</button>
       </div>`;
@@ -159,8 +198,7 @@ function renderClaims() {{
 function renderTranscript() {{
   const el = document.getElementById('transcript');
   el.innerHTML = (transcript.segments || []).map(s => {{
-    const ts = s.start || 0;
-    const mm = Math.floor(ts/60), ss = Math.floor(ts%60);
+    const mm = Math.floor(s.start/60), ss = Math.floor(s.start%60);
     return `<div><span class="ts">${{String(mm).padStart(2,'0')}}:${{String(ss).padStart(2,'0')}}</span> ${{escape(s.text || '')}}</div>`;
   }}).join('');
 }}
@@ -172,6 +210,40 @@ function toggleClaim(i) {{
   renderClaims();
 }}
 function escape(s) {{ return String(s).replace(/[&<>"]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c])); }}
+
+async function addMark() {{
+  const inp = document.getElementById('markTs');
+  const st = document.getElementById('markStatus');
+  const ts = parseFloat(inp.value);
+  if (isNaN(ts) || ts < 0) {{ st.textContent = 'enter a valid second'; return; }}
+  st.textContent = 'queuing mark — extension will capture on the YouTube tab…';
+  // Queue the mark on the server; the extension polls /api/mark/pending on its
+  // YouTube tab, captures the frame, and POSTs it back via /api/mark/complete.
+  try {{
+    await fetch('/api/mark', {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{timestamp_s: ts}}) }});
+  }} catch (e) {{ st.textContent = 'queue failed: ' + e; return; }}
+  const before = candidates.length;
+  let tries = 0;
+  const poll = setInterval(async () => {{
+    tries++;
+    try {{
+      const r = await fetch('/api/candidates');
+      const data = await r.json().catch(() => ({{}}));
+      const fresh = (data && data.candidates) || [];
+      if (fresh.length > before) {{
+        clearInterval(poll);
+        candidates.length = 0;
+        fresh.forEach(c => candidates.push(c));
+        renderFrames();
+        st.textContent = 'added ✓ (save to persist)';
+        inp.value = '';
+      }} else if (tries > 90) {{
+        clearInterval(poll);
+        st.textContent = 'no frame yet — open the YouTube tab with the extension, then it captures within ~2s.';
+      }}
+    }} catch (e) {{ /* keep polling */ }}
+  }}, 1000);
+}}
 
 async function saveAll() {{
   const status = document.getElementById('status');
@@ -208,6 +280,15 @@ class _ReviewHandler(http.server.BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path in ("/", "/index.html"):
             self._send_html()
+        elif url.path == "/api/mark/pending":
+            self._json_ok({"pending": _pop_pending_marks(peek=True)})
+        elif url.path == "/api/candidates":
+            # Review page polls this to learn when a mark completed.
+            try:
+                data = json.loads(self.candidates_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = []
+            self._json_ok({"candidates": data})
         elif url.path.startswith("/frames/"):
             # Serve frame PNGs
             rel = url.path[len("/frames/") :]
@@ -221,8 +302,23 @@ class _ReviewHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _json_ok(self, obj: dict) -> None:
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
+        if url.path == "/api/mark":
+            self._handle_mark_request()
+            return
+        if url.path == "/api/mark/complete":
+            self._handle_mark_complete()
+            return
         if url.path != "/api/save":
             self.send_error(404)
             return
@@ -248,6 +344,81 @@ class _ReviewHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"ok": true}')
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length).decode("utf-8")
+        return json.loads(raw) if raw.strip() else {}
+
+    def _handle_mark_request(self) -> None:
+        """Queue a manual-mark request from the review page.
+
+        The review page POSTs {timestamp_s}; we hold it in a pending queue that
+        the extension polls (it owns the <video> and does the actual capture).
+        """
+        try:
+            body = self._read_json_body()
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_error(400, f"bad json: {exc}")
+            return
+        ts = body.get("timestamp_s")
+        if not isinstance(ts, (int, float)):
+            self.send_error(400, "timestamp_s required")
+            return
+        mark = _push_pending_mark(float(ts))
+        self._json_ok({"ok": True, "queued": mark})
+
+    def _handle_mark_complete(self) -> None:
+        """Save the extension's captured frame for a pending mark.
+
+        The extension POSTs {id, timestamp_s, image_b64} after seeking+capturing
+        on the YouTube tab. We persist the PNG and append the candidate.
+        """
+        import base64
+
+        try:
+            body = self._read_json_body()
+        except (ValueError, json.JSONDecodeError) as exc:
+            self.send_error(400, f"bad json: {exc}")
+            return
+        mark_id = body.get("id")
+        ts = float(body.get("timestamp_s") or 0)
+        image_b64 = body.get("image_b64") or ""
+        if not image_b64:
+            self.send_error(400, "image_b64 required")
+            return
+        _pop_pending_marks(mark_id=mark_id)
+
+        if "," in image_b64 and image_b64.split(",", 1)[0].startswith("data:"):
+            image_b64 = image_b64.split(",", 1)[1]
+        try:
+            png = base64.b64decode(image_b64)
+        except (ValueError, TypeError) as exc:
+            self.send_error(400, f"bad base64: {exc}")
+            return
+
+        video_dir = self.candidates_path.parent
+        frames_dir = video_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        candidates = json.loads(self.candidates_path.read_text(encoding="utf-8"))
+        next_index = max([c.get("index", 0) for c in candidates] or [0]) + 1
+        fname = f"frame_{next_index:04d}.png"
+        (frames_dir / fname).write_bytes(png)
+
+        candidate = {
+            "index": next_index,
+            "timestamp_s": ts,
+            "frame_path": f"frames/{fname}",
+            "extracted": True,
+            "accepted": True,
+            "manual": True,
+        }
+        candidates.append(candidate)
+        self.candidates_path.write_text(
+            json.dumps(candidates, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self._json_ok({"ok": True, "candidate": candidate})
 
     def _send_html(self) -> None:
         candidates = json.loads(self.candidates_path.read_text(encoding="utf-8"))

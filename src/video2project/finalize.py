@@ -93,6 +93,18 @@ def render_markdown(
                 lines.append(f"- {stamp} [open in YouTube]({link}) — `{frame_abs}`")
             else:
                 lines.append(f"- {stamp} `{frame_abs}`")
+            # OCR-extracted inner info (browser-capture pipeline). Flag frames
+            # whose OCR confidence was too low to trust — those need human eyes.
+            ocr_text = (c.get("ocr_text") or "").strip()
+            if ocr_text:
+                flag = " ⚠️ _needs human check_" if c.get("needs_human") else ""
+                lines.append(f"  - **OCR**{flag}:")
+                for oline in ocr_text.splitlines():
+                    oline = oline.strip()
+                    if oline:
+                        lines.append(f"    > {oline}")
+            elif c.get("needs_human"):
+                lines.append("  - ⚠️ _needs human check (OCR uncertain)_")
         lines.append("")
 
     # Claims
@@ -202,6 +214,9 @@ def render_index_json(
                 "path": c.get("frame_path"),
                 "accepted": c.get("accepted", False),
                 "extracted": c.get("extracted", False),
+                "ocr_text": c.get("ocr_text", ""),
+                "ocr_confidence": c.get("ocr_confidence", 0.0),
+                "needs_human": c.get("needs_human", False),
             }
             for c in candidates
         ],
