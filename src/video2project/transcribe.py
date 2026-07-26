@@ -24,8 +24,10 @@ _FALLBACK_MODEL = "small"
 _DEVICE = os.environ.get("V2P_WHISPER_DEVICE", "cpu")
 _COMPUTE = "int8"  # CPU-friendly quantization
 
-# Languages to hint; Chinese content is primary but allow English too.
-_DEFAULT_LANGUAGE = os.environ.get("V2P_WHISPER_LANGUAGE", "zh")
+# Language hint. Default = auto-detect (empty) so English and other videos work;
+# a hard "zh" hint silently yields 0 segments on non-Chinese audio. Set
+# V2P_WHISPER_LANGUAGE=zh to force Chinese when you know the content is Chinese.
+_DEFAULT_LANGUAGE = os.environ.get("V2P_WHISPER_LANGUAGE", "")
 
 _model_cache: dict[str, Any] = {}
 
@@ -51,7 +53,9 @@ def _transcribe_with(model_name: str, audio_path: Path) -> tuple[list[dict], str
     segments_iter, info = model.transcribe(
         str(audio_path),
         language=_DEFAULT_LANGUAGE or None,
-        vad_filter=True,  # drop silence; tightens segments for frame picking
+        # VAD off: it discards music/quiet-speech segments entirely (0 segments on
+        # songs). For videos with mixed content, let Whisper see everything.
+        vad_filter=False,
         beam_size=5,
     )
     segments: list[dict[str, Any]] = []
