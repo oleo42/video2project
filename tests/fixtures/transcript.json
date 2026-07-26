@@ -1,0 +1,21 @@
+{
+  "platform": "youtube",
+  "video_id": "SMOKETEST01",
+  "url": "https://www.youtube.com/watch?v=SMOKETEST01",
+  "title": "Test Video: Why Photosynthesis Matters",
+  "channel": "Test Channel",
+  "duration_s": 180,
+  "upload_date": "20260101",
+  "language": "en",
+  "source": "fixture",
+  "segments": [
+    {"start": 0.0, "end": 4.5, "text": "Today we will discuss photosynthesis in plants."},
+    {"start": 4.5, "end": 9.0, "text": "Photosynthesis converts light energy into chemical energy."},
+    {"start": 9.0, "end": 14.0, "text": "The chemical equation is 6 CO2 plus 6 H2O plus light yields C6H12O6 plus 6 O2."},
+    {"start": 14.0, "end": 22.0, "text": "This was first demonstrated by Jan Ingenhousz in 1779."},
+    {"start": 22.0, "end": 26.0, "text": "Plants appear green because chlorophyll absorbs red and blue light."},
+    {"start": 26.0, "end": 32.0, "text": "Now let's move on to cellular respiration."},
+    {"start": 32.0, "end": 40.0, "text": "Cellular respiration breaks down glucose to release energy as ATP."},
+    {"start": 40.0, "end": 50.0, "text": "Thanks for watching! Subscribe for more biology content."}
+  ]
+}

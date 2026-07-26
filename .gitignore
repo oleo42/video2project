@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+
+# Output (per-video artifacts) — generated, not source
+output/
+
+# Test artifacts
+.pytest_cache/
+*.log
+!logs/.gitkeep
