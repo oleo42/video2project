@@ -114,13 +114,23 @@ def serve(
     block: bool = True,
 ) -> socketserver.ThreadingTCPServer | None:
     """Start the ingest server. If ``block`` is False, runs in a daemon thread."""
-    if _port_in_use(host, port):
-        raise RuntimeError(
-            f"port {port} already in use — is a review/ingest server running?"
-        )
-    server = socketserver.ThreadingTCPServer((host, port), _IngestHandler)
-    server.allow_reuse_address = True
-    server.daemon_threads = True
+
+    # ThreadingTCPServer sets allow_reuse_address as a class attribute; override
+    # BEFORE constructing so SO_REUSEADDR takes effect at bind time. Without this,
+    # a crashed/restarted server leaves the port in TIME_WAIT and rebind fails.
+    class _ReusableServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    try:
+        server = _ReusableServer((host, port), _IngestHandler)
+    except OSError as exc:
+        if exc.errno == 98:  # EADDRINUSE — a live server is holding the port
+            raise RuntimeError(
+                f"port {port} in use by a live process; run "
+                f"`pkill -f 'video2project capture'` then retry"
+            ) from exc
+        raise
 
     url = f"http://{host}:{port}/"
     print(f"video2project ingest server: {url}")
