@@ -5,12 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>video2project Capture</title>
   <style>
-    body { font: 13px/1.5 system-ui, sans-serif; width: 300px; margin: 0; padding: 14px; }
+    body { font: 13px/1.5 system-ui, sans-serif; width: 320px; margin: 0; padding: 14px; }
     h1 { font-size: 14px; margin: 0 0 10px; }
     button {
       width: 100%; padding: 9px; border: 0; border-radius: 6px;
-      background: #c00; color: #fff; font-weight: 600; cursor: pointer;
+      color: #fff; font-weight: 600; cursor: pointer; margin-bottom: 6px;
     }
+    #run { background: #c00; }
+    #stop { background: #444; display: none; }
+    #mark { background: #0a6; display: none; }
     button:disabled { background: #999; cursor: default; }
     #status {
       margin-top: 10px; padding: 8px; border-radius: 6px; background: #f2f2f2;
@@ -22,11 +25,14 @@
 <body>
   <h1>video2project Capture</h1>
   <button id="run">Analyze this video</button>
+  <button id="stop">Stop capture (finalize with what we have)</button>
+  <button id="mark">📌 Mark frame at current time</button>
   <div id="status">idle</div>
   <div class="hint">
-    Requires the local server: run <code>video2project capture</code> first.
-    Audio records in real time (the video plays through), then frames are
-    captured. Keep this tab open until done.
+    Requires the local server: <code>video2project capture</code>.
+    Audio records in real time; when you're done, click <b>Stop</b> — or
+    pause the video &amp; wait 10s to auto-finalize. Use <b>Mark</b> to save
+    a specific frame while watching.
   </div>
   <script src="popup.js"></script>
 </body>
