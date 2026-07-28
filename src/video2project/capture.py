@@ -23,6 +23,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -38,10 +40,17 @@ _AUDIO_NAME = "audio.webm"
 _PENDING_TS = "pending_timestamps.json"
 _STATE_NAME = "state.json"
 _RUN_SUMMARY = "run_summary.json"
+_OCR_RESULTS = "ocr_results.json"
 
 # Per-frame OCR timeout when running in an isolated subprocess. Frames that
 # take longer than this (or crash PaddleOCR entirely) are skipped, not fatal.
 _OCR_SUBPROC_TIMEOUT_S = 60.0
+
+# Obsidian vault mirror root. Every capture piece (audio → frames → marks)
+# rsyncs its video_dir here so the vault stays live during a session. Skipped
+# silently when the drive isn't mounted (dev boxes without the vault).
+_DEFAULT_VAULT = "/mnt/d/Learning_ob_vault/50-projects/video2project"
+VAULT_DIR = os.environ.get("V2P_VAULT_DIR", _DEFAULT_VAULT)
 
 # ── payload helpers ─────────────────────────────────────────────────
 
@@ -182,6 +191,70 @@ def _run_ocr_subproc(
     return None
 
 
+def _frame_sha256(p: Path) -> str:
+    """Content hash of a frame PNG. Stable across runs."""
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _load_ocr_cache(video_dir: Path) -> dict[str, dict[str, Any]]:
+    """Load prior OCR results keyed by frame sha256.
+
+    Migration: old results were keyed by filename only (no ``sha256`` field).
+    We keep them under ``by_name`` so a same-named-but-different-content frame
+    is NOT reused (sha wins), but a same-name-and-content frame still hits.
+    """
+    p = video_dir / _OCR_RESULTS
+    if not p.exists():
+        return {}
+    try:
+        prior = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    by_sha: dict[str, dict[str, Any]] = {}
+    for r in prior or []:
+        sha = r.get("sha256")
+        if sha:
+            by_sha[sha] = r
+    return by_sha
+
+
+def _ocr_frames_with_cache(
+    video_dir: Path, frame_paths: list[Path]
+) -> list[dict[str, Any]]:
+    """OCR only frames whose sha256 isn't already cached. Skips redoing work.
+
+    Reuses a good prior result (``ocr_failed`` False) verbatim. Retries any
+    prior failure so a fixed PaddleOCR or a rerun after removing the bad file
+    picks it up. Results are returned in the same order as ``frame_paths``.
+    """
+    if not frame_paths:
+        return []
+    cache = _load_ocr_cache(video_dir)
+    shas = [_frame_sha256(p) for p in frame_paths]
+    todo: list[tuple[int, Path]] = []
+    results: list[dict[str, Any] | None] = [None] * len(frame_paths)
+    for i, (p, sha) in enumerate(zip(frame_paths, shas)):
+        hit = cache.get(sha)
+        if hit and not hit.get("ocr_failed"):
+            # Rebind frame_path to the current name (mark_XXXX may change).
+            r = dict(hit)
+            r["frame_path"] = p.name
+            r["sha256"] = sha
+            r["cached"] = True
+            results[i] = r
+        else:
+            todo.append((i, p))
+    if todo:
+        fresh = _ocr_frames_isolated([p for _, p in todo])
+        for (i, p), r in zip(todo, fresh):
+            r = dict(r)
+            r["sha256"] = shas[i]
+            r["cached"] = False
+            results[i] = r
+    # results is guaranteed populated at this point
+    return [r for r in results if r is not None]
+
+
 def _write_run_summary(video_dir: Path, metadata: dict[str, Any]) -> Path:
     """Write a small canonical summary of what the run produced.
 
@@ -227,6 +300,48 @@ def _write_run_summary(video_dir: Path, metadata: dict[str, Any]) -> Path:
     return out
 
 
+def _copy_if_changed(src: Path, target: Path) -> bool:
+    """Copy src → target only if size/mtime differ. Returns True on write."""
+    if target.exists():
+        ss, ts = src.stat(), target.stat()
+        if ss.st_size == ts.st_size and ss.st_mtime <= ts.st_mtime:
+            return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, target)
+    return True
+
+
+def _mirror_to_vault(video_dir: Path, metadata: dict[str, Any]) -> Path | None:
+    """Incremental mirror of video_dir → Obsidian vault. Rsync-like.
+
+    Called after every capture piece (start_job, audio, mark, frames) so the
+    vault is always ≤1 stage behind the source of truth. Only copies files
+    whose size+mtime differ from the vault copy — a same-video re-Analyze
+    finishes in <50ms. Silently no-ops when the vault drive isn't mounted;
+    never raises — a broken mirror MUST NOT kill a capture.
+    """
+    if not video_dir.exists():
+        return None
+    vault = Path(VAULT_DIR)
+    if not vault.parent.exists():
+        return None  # drive not mounted; skip silently
+    platform = metadata.get("platform", "youtube")
+    video_id = metadata.get("video_id")
+    if not video_id:
+        return None
+    dst = vault / "captures" / f"{platform}__{video_id}"
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for src in video_dir.rglob("*"):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(video_dir)
+            _copy_if_changed(src, dst / rel)
+    except OSError:
+        return None  # broken mirror is not fatal
+    return dst
+
+
 def read_state(platform: str, video_id: str) -> dict[str, Any]:
     """Public accessor for the /api/state endpoint.
 
@@ -266,6 +381,7 @@ def start_job(metadata: dict[str, Any]) -> dict[str, Any]:
     video_dir = paths.video_dir(platform, video_id)
     _save_json(video_dir / "capture_metadata.json", metadata)
     _stage_done(video_dir, "start_job", video_duration_s=metadata.get("duration_s"))
+    _mirror_to_vault(video_dir, metadata)
     return {"video_dir": str(video_dir), "platform": platform, "video_id": video_id}
 
 
@@ -315,6 +431,7 @@ def ingest_audio(metadata: dict[str, Any], audio_b64: str) -> dict[str, Any]:
                     partial=cached_partial,
                     cached=True,
                 )
+                _mirror_to_vault(video_dir, metadata)
                 return {
                     "video_id": video_id,
                     "n_segments": len(cached_segments),
@@ -356,6 +473,7 @@ def ingest_audio(metadata: dict[str, Any], audio_b64: str) -> dict[str, Any]:
         video_duration_s=duration_s,
         partial=partial,
     )
+    _mirror_to_vault(video_dir, metadata)
 
     return {
         "video_id": video_id,
@@ -435,7 +553,7 @@ def ingest_frames(
     # OCR each frame in isolated subprocesses. A crash or timeout on one frame
     # is captured as ocr_failed=True on that candidate; the run continues.
     try:
-        ocr_results = _ocr_frames_isolated(saved)
+        ocr_results = _ocr_frames_with_cache(video_dir, saved)
     except Exception as exc:
         _stage_fail(video_dir, "ingest_frames", f"ocr: {exc}")
         raise
@@ -469,6 +587,7 @@ def ingest_frames(
         n_ocr_failed=n_ocr_failed,
     )
     _write_run_summary(video_dir, metadata)
+    _mirror_to_vault(video_dir, metadata)
 
     return {
         "video_id": video_id,
@@ -518,6 +637,7 @@ def ingest_mark(
         }
     )
     _save_json(marks_path, marks)
+    _mirror_to_vault(video_dir, metadata)
 
     return {
         "video_id": video_id,

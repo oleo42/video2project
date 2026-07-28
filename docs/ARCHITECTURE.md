@@ -1,6 +1,6 @@
 # video2project — Architecture
 
-**Version:** v1  ·  **Last change:** 2026-07-28 — robustness: stage checkpoints in `state.json`, subprocess-isolated OCR (survives PaddleOCR SIGTERM), `/api/state` endpoint, extension resume-on-Analyze, `run_summary.json`.
+**Version:** v1  ·  **Last change:** 2026-07-28 — sha256-cached OCR (re-run in <1s), auto-mirror to Obsidian vault after every capture piece.
 
 Before rewriting this file for a significant architecture change, snapshot the current version as `ARCHITECTURE-v<N>.md` so the design history stays comparable.
 
@@ -147,13 +147,15 @@ flowchart TD
 - **Stages checkpoint to `state.json` before returning.** Every server stage writes `{started_at, ok, done_at, ...}` so a crash between stages is recoverable — the extension asks `/api/state` and skips already-done work. Also detects partial-audio runs (audio_end < 50% of video duration).
 - **OCR runs in an isolated subprocess.** PaddleOCR can SIGTERM on some frames (OneDNN aborts, memory pressure). Batch subprocess handles the fast path; if it crashes, per-frame retry ensures one bad frame doesn't kill the run. Failed frames get `ocr_failed=True` and stay in candidates for later retry.
 - **`run_summary.json` per video.** Flat, canonical summary of what a run produced: durations, counts, warnings, errors. Consumed by Obsidian vault mirror and future AI agents — the file to read to answer "did the run succeed?"
+- **OCR results cached by frame sha256.** `ocr_results.json` stamps each entry with the frame's content hash. Re-running `ingest_frames` on the same video does a full-cache pass in <1s instead of re-OCR'ing every frame (~10s each). Manual marks added later only OCR the new ones.
+- **Vault mirror fires after every capture piece.** `start_job` / `ingest_audio` / `ingest_mark` / `ingest_frames` each call `_mirror_to_vault` which incrementally rsyncs the video_dir → `$V2P_VAULT_DIR/captures/<video_id>/`. Users see marks appear in Obsidian mid-session; no manual sync needed. No-ops silently on machines without `/mnt/d`.
 
 ---
 
 ## Known scars (not yet fixed, keep in mind)
 
 - **`POST /api/audio` blocks for the full transcription time** on a cold call (~1× real-time). Cache + `resume` make the second call ~1s. A cold-cache WSL shutdown still kills the run mid-transcribe. Async transcription refactor stays deferred; the recovery cost is now cheap.
-- **Subprocess-isolated OCR costs ~15s overhead per batch** (PaddleOCR bootstrap). Worth it for crash isolation; if a run has 20+ frames and we want speed back, batch the entire OCR in one persistent worker process.
+- **First-run OCR is the bottleneck** (~10s/frame × N frames). The sha256 cache eliminates repeat cost, but a fresh video still needs one cold pass. Persistent OCR worker process is the next win if this ever bites.
 - **`master` still has the legacy yt-dlp flow.** Not merged with browser-capture; pick one branch per project.
 
 ---
