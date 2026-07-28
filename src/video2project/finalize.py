@@ -72,7 +72,10 @@ def render_markdown(
         lines.append("")
 
     # Frames
-    accepted = [c for c in candidates if c.get("accepted") and c.get("extracted")]
+    accepted = sorted(
+        (c for c in candidates if c.get("accepted") and c.get("extracted")),
+        key=lambda c: float(c.get("timestamp_s", 0)),
+    )
     lines.append(f"## Key frames ({len(accepted)} of {len(candidates)} accepted)")
     lines.append("")
     if not accepted:
