@@ -85,6 +85,17 @@
     }
   }
 
+  async function getServerState(videoId) {
+    try {
+      const r = await fetch(SERVER + "/api/state?video_id=" + encodeURIComponent(videoId));
+      if (!r.ok) return null;
+      const data = await r.json();
+      return data && data.ok ? data : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function setStatus(msg) {
     window.__v2pStatus = msg;
     // Persist so a closed-then-reopened popup still sees the latest state.
@@ -255,7 +266,36 @@
       setStatus("starting…");
       await post("/api/start", metadata);
 
-      const timestamps = await captureAudio(video, metadata);
+      // Check server state for this video. If a prior run's audio transcript
+      // is already ok, skip Pass 1 entirely and jump to Pass 2 with cached
+      // timestamps. If audio exists but is partial, ask before re-recording.
+      const priorState = await getServerState(metadata.video_id);
+      const audioStage = priorState && priorState.stages && priorState.stages.ingest_audio;
+      const framesStage = priorState && priorState.stages && priorState.stages.ingest_frames;
+      let timestamps;
+      if (framesStage && framesStage.ok) {
+        setStatus(`already finalized (${framesStage.n_frames} frames) — nothing to do`);
+        return { ok: true, result: { ...framesStage, resumed: "already-done" } };
+      }
+      if (audioStage && audioStage.ok && !audioStage.partial) {
+        setStatus("prior transcript found — skipping audio capture");
+        // The server has pending_timestamps.json on disk; re-POSTing the same
+        // audio would be free (sha256 cache), but we don't have the audio in
+        // this tab context. Instead, ask the server to hand us the timestamps
+        // via a no-op /api/audio call with an empty audio_b64 — the server
+        // rejects empty audio. So we skip straight to Pass 2 using the
+        // timestamps embedded in the state.
+        timestamps = audioStage.timestamps || null;
+        if (!timestamps) {
+          setStatus("prior transcript present but timestamps missing — re-recording");
+          timestamps = await captureAudio(video, metadata);
+        }
+      } else {
+        if (audioStage && audioStage.ok && audioStage.partial) {
+          setStatus("prior run was partial — re-recording audio");
+        }
+        timestamps = await captureAudio(video, metadata);
+      }
       setStatus(`transcribed; ${timestamps.length} frame timestamps`);
 
       const result = await captureFrames(video, metadata, timestamps);

@@ -1,6 +1,6 @@
 # video2project — Architecture
 
-**Version:** v1  ·  **Last change:** 2026-07-28 — added sha256-based idempotency in `ingest_audio` + `video2project resume` CLI.
+**Version:** v1  ·  **Last change:** 2026-07-28 — robustness: stage checkpoints in `state.json`, subprocess-isolated OCR (survives PaddleOCR SIGTERM), `/api/state` endpoint, extension resume-on-Analyze, `run_summary.json`.
 
 Before rewriting this file for a significant architecture change, snapshot the current version as `ARCHITECTURE-v<N>.md` so the design history stays comparable.
 
@@ -73,8 +73,8 @@ sequenceDiagram
 | | `extension/content.js` | Runs on YouTube page. Owns `<video>`, Pass 1 recorder, Pass 2 seeker, mark POST, stop button. |
 | | `extension/popup.html` + `popup.js` | Toolbar UI. Polls `chrome.storage.local` for state (survives popup close). |
 | | `extension/background.js` | Service worker. Fires `v2p-run` to content script; fire-and-forget so long capture doesn't hit "channel closed" errors. |
-| **Server** | `src/video2project/ingest_server.py` | Stdlib `ThreadingTCPServer` on :8765. Routes: `/api/health`, `/api/start`, `/api/audio`, `/api/frames`, `/api/mark`. |
-| | `src/video2project/capture.py` | HTTP-endpoint logic. `start_job`, `ingest_audio` (**sha256-idempotent**), `ingest_frames`, `ingest_mark` (persist-on-click). |
+| **Server** | `src/video2project/ingest_server.py` | Stdlib `ThreadingTCPServer` on :8765. Routes: `/api/health`, `/api/state` (GET), `/api/start`, `/api/audio`, `/api/frames`, `/api/mark`. |
+| | `src/video2project/capture.py` | HTTP-endpoint logic. `start_job`, `ingest_audio` (**sha256-idempotent**), `ingest_frames` (subprocess-isolated OCR), `ingest_mark` (persist-on-click), `read_state`. All stages checkpoint to `state.json`. |
 | | `src/video2project/transcribe.py` | Whisper wrapper. Auto-language, VAD off (music/quiet-speech safe). |
 | | `src/video2project/ocr.py` | PaddleOCR 3.x wrapper. Confidence < 0.85 → `needs_human=True`. |
 | | `src/video2project/finalize.py` | Writes `index.md` + `index.json`; tolerates missing frames/claims. |
@@ -144,12 +144,16 @@ flowchart TD
 - **Fire-and-forget message channel.** Popup gets `{started: true}` in <1s and closes safely; capture continues in content script; state flows through `chrome.storage.local`. Fixed "async listener returned true, channel closed" error.
 - **Marks POST immediately, not batched.** A crash mid-run used to lose all marks; now each click is one atomic disk write.
 - **`ingest_audio` is idempotent by sha256.** Transcript.json stores `audio_sha256`; re-POSTing the same audio returns cached timestamps in ~1s instead of re-running Whisper. Enables `video2project resume <video_id>` for crash recovery.
+- **Stages checkpoint to `state.json` before returning.** Every server stage writes `{started_at, ok, done_at, ...}` so a crash between stages is recoverable — the extension asks `/api/state` and skips already-done work. Also detects partial-audio runs (audio_end < 50% of video duration).
+- **OCR runs in an isolated subprocess.** PaddleOCR can SIGTERM on some frames (OneDNN aborts, memory pressure). Batch subprocess handles the fast path; if it crashes, per-frame retry ensures one bad frame doesn't kill the run. Failed frames get `ocr_failed=True` and stay in candidates for later retry.
+- **`run_summary.json` per video.** Flat, canonical summary of what a run produced: durations, counts, warnings, errors. Consumed by Obsidian vault mirror and future AI agents — the file to read to answer "did the run succeed?"
 
 ---
 
 ## Known scars (not yet fixed, keep in mind)
 
-- **`POST /api/audio` blocks for the full transcription time** on a cold call (~1× real-time). Idempotent cache makes the second call ~1s, so a crash-then-`resume` is cheap. A cold-cache WSL shutdown still kills the run — do the deferred async refactor only if this bites ≥2× a week. Not fixing preemptively.
+- **`POST /api/audio` blocks for the full transcription time** on a cold call (~1× real-time). Cache + `resume` make the second call ~1s. A cold-cache WSL shutdown still kills the run mid-transcribe. Async transcription refactor stays deferred; the recovery cost is now cheap.
+- **Subprocess-isolated OCR costs ~15s overhead per batch** (PaddleOCR bootstrap). Worth it for crash isolation; if a run has 20+ frames and we want speed back, batch the entire OCR in one persistent worker process.
 - **`master` still has the legacy yt-dlp flow.** Not merged with browser-capture; pick one branch per project.
 
 ---

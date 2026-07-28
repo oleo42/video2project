@@ -65,6 +65,23 @@ class _IngestHandler(http.server.BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/api/health":
             self._json({"ok": True, "service": "video2project-ingest"})
+        elif url.path == "/api/state":
+            # Snapshot of a video's pipeline state, for the extension to decide
+            # whether to resume from a checkpoint or start fresh.
+            from urllib.parse import parse_qs
+
+            qs = parse_qs(url.query)
+            video_id = (qs.get("video_id") or [""])[0]
+            platform = (qs.get("platform") or ["youtube"])[0]
+            if not video_id:
+                self._json({"ok": False, "error": "video_id required"}, status=400)
+                return
+            try:
+                state = capture.read_state(platform, video_id)
+            except Exception as exc:  # noqa: BLE001
+                self._json({"ok": False, "error": str(exc)}, status=500)
+                return
+            self._json({"ok": True, "video_id": video_id, **state})
         else:
             self.send_error(404)
 
