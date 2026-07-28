@@ -107,12 +107,15 @@ def ingest_frames(
 
     saved: list[Path] = []
     candidates: list[dict[str, Any]] = []
+    # Track (rounded ts, path) to dedupe against manual marks below.
+    seen_ts: set[int] = set()
     for i, fr in enumerate(frames, start=1):
         ts = float(fr.get("timestamp_s", 0))
         img = _b64_to_bytes(fr["image_b64"])
         out = frames_dir / f"frame_{i:04d}.png"
         out.write_bytes(img)
         saved.append(out)
+        seen_ts.add(round(ts * 10))
         candidates.append(
             {
                 "index": i,
@@ -120,9 +123,36 @@ def ingest_frames(
                 "frame_path": f"frames/{out.name}",
                 "extracted": True,
                 "accepted": True,
+                "manual": False,
             }
         )
 
+    # Merge previously-saved manual marks (already on disk as mark_XXXX.png).
+    marks_path = video_dir / "pending_marks.json"
+    if marks_path.exists():
+        try:
+            for mark in json.loads(marks_path.read_text(encoding="utf-8")) or []:
+                ts = float(mark.get("timestamp_s", 0))
+                key = round(ts * 10)
+                if key in seen_ts:
+                    continue  # deduped against auto-selected
+                seen_ts.add(key)
+                # The PNG is already at frames/mark_XXXX.png; just reference it.
+                mark_png = frames_dir / Path(mark["frame_path"]).name
+                if mark_png.exists():
+                    saved.append(mark_png)
+                    candidates.append(
+                        {
+                            "index": len(candidates) + 1,
+                            "timestamp_s": ts,
+                            "frame_path": f"frames/{mark_png.name}",
+                            "extracted": True,
+                            "accepted": True,
+                            "manual": True,
+                        }
+                    )
+        except (json.JSONDecodeError, OSError):
+            pass  # bad marks file — keep going without it
     # OCR each frame; attach text + human-check flag to its candidate.
     ocr_results = ocr_frames(saved)
     by_name = {r["frame_path"]: r for r in ocr_results}
@@ -151,4 +181,51 @@ def ingest_frames(
     }
 
 
-__all__ = ["start_job", "ingest_audio", "ingest_frames"]
+def ingest_mark(
+    metadata: dict[str, Any], timestamp_s: float, image_b64: str
+) -> dict[str, Any]:
+    """Save ONE manually-marked frame right now.
+
+    Called by the extension's mark button each time the user clicks it. The
+    PNG lands in ``frames/mark_<n>.png`` immediately, and a stub entry is
+    appended to ``pending_marks.json``. If Pass 2 (``ingest_frames``) runs
+    later, it merges these marks with the auto-selected timestamps. If it
+    never runs, the marks are still on disk for review.
+    """
+    platform = metadata.get("platform", "youtube")
+    video_id = metadata["video_id"]
+    paths.ensure_dirs(platform, video_id)
+    video_dir = paths.video_dir(platform, video_id)
+    frames_dir = paths.frames_dir(platform, video_id)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    marks_path = video_dir / "pending_marks.json"
+    marks: list[dict[str, Any]] = []
+    if marks_path.exists():
+        try:
+            marks = json.loads(marks_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            marks = []
+
+    idx = len(marks) + 1
+    out = frames_dir / f"mark_{idx:04d}.png"
+    out.write_bytes(_b64_to_bytes(image_b64))
+
+    marks.append(
+        {
+            "index": idx,
+            "timestamp_s": float(timestamp_s),
+            "frame_path": f"frames/{out.name}",
+        }
+    )
+    _save_json(marks_path, marks)
+
+    return {
+        "video_id": video_id,
+        "index": idx,
+        "frame_path": str(out),
+        "total_marks": len(marks),
+    }
+
+
+__all__ = ["start_job", "ingest_audio", "ingest_frames", "ingest_mark"]

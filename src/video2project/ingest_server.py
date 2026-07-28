@@ -87,6 +87,15 @@ class _IngestHandler(http.server.BaseHTTPRequestHandler):
                 result = capture.ingest_frames(
                     body.get("metadata") or {}, body.get("frames") or []
                 )
+            elif url.path == "/api/mark":
+                # Save ONE marked frame immediately — the extension calls this
+                # each time the user clicks the mark button. Persists to disk
+                # right away so a later crash doesn't lose the mark.
+                result = capture.ingest_mark(
+                    body.get("metadata") or {},
+                    float(body.get("timestamp_s") or 0),
+                    body.get("image_b64") or "",
+                )
             else:
                 self.send_error(404)
                 return

@@ -125,10 +125,9 @@
   // Short pauses (buffer, scrubbing) shouldn't kill an in-progress run.
   const PAUSE_AUTOSTOP_MS = 10_000;
 
-  // Live capture state for stop-button / mark-button handling from the popup.
+  // Live capture state for stop-button handling from the popup.
   let activeRec = null;
   let stopRequested = false;
-  const manualMarks = []; // {timestamp_s, image_b64} — merged into captureFrames
 
   async function captureAudio(video, metadata) {
     if (!video.captureStream) {
@@ -224,26 +223,12 @@
         console.warn("v2p frame capture failed at", ts, e);
       }
     }
-    // Adds user's manual marks from the popup button (captured during Pass 1).
-    // We already have the image_b64; just append.
-    if (manualMarks.length > 0) {
-      setStatus(`adding ${manualMarks.length} manual mark(s)…`);
-      frames.push(...manualMarks);
-    }
-    // Dedupe by timestamp (rounded to 0.1s) — user may have marked a frame
-    // that was also auto-selected. Keep the manual one (pushed last wins).
-    const seenTs = new Set();
-    const deduped = [];
-    for (const f of frames.slice().reverse()) {
-      const key = Math.round(f.timestamp_s * 10);
-      if (seenTs.has(key)) continue;
-      seenTs.add(key);
-      deduped.push(f);
-    }
-    deduped.reverse();  // restore original order
-    if (!deduped.length) throw new Error("no frames captured");
+    // Manual marks are already POSTed to /api/mark on click and live in
+    // pending_marks.json server-side. ingest_frames() will merge/dedupe when
+    // we POST /api/frames below — no client-side coordination needed.
+    if (!frames.length) throw new Error("no frames captured");
     setStatus("uploading frames…");
-    const result = await post("/api/frames", { metadata, frames: deduped });
+    const result = await post("/api/frames", { metadata, frames });
     return result;
   }
 
@@ -254,7 +239,6 @@
   async function runCapture() {
     if (running) return { ok: false, error: "already running" };
     running = true;
-    manualMarks.length = 0;
     stopRequested = false;
     try {
       if (!(await health())) {
@@ -353,17 +337,22 @@
       return false;
     }
     if (msg && msg.type === "v2p-mark-current") {
-      // Snapshot the CURRENT playhead frame and stash it in manualMarks[].
-      // captureFrames() will merge these into the frames POST when Pass 2 runs.
-      // Note: seeking the video during Pass 1 would corrupt the audio recording,
-      // so we DON'T seek — we grab from the current playhead.
+      // Snapshot the CURRENT playhead frame and POST it to the server RIGHT NOW.
+      // Persisting on click (not deferred to Pass 2) means a crash / tab close /
+      // stuck transcription never loses your marks.
+      //
+      // Works with the capture running (during audio recording) OR standalone
+      // (before you click Analyze — the mark still saves via /api/start +
+      // /api/mark). We DON'T seek the video (would break in-flight audio
+      // recording); we grab the current playhead frame directly.
       (async () => {
         try {
           const video = getVideo();
           if (!video) throw new Error("no <video> element");
-          if (!running) throw new Error("start a capture first (Analyze this video)");
+          const metadata = readMetadata();
+          if (!metadata.video_id) throw new Error("no video id in URL");
+
           const ts = video.currentTime;
-          // Draw current frame without seeking (safe during audio recording).
           const canvas = document.createElement("canvas");
           const scale = FRAME_HEIGHT / video.videoHeight;
           canvas.width = Math.round(video.videoWidth * scale);
@@ -372,10 +361,19 @@
           const image_b64 = canvas
             .toDataURL("image/png")
             .replace(/^data:image\/png;base64,/, "");
-          manualMarks.push({ timestamp_s: ts, image_b64 });
-          sendResponse({ ok: true, timestamp_s: ts, total: manualMarks.length });
+
+          if (!(await health())) {
+            throw new Error("local server not reachable — run `video2project capture`");
+          }
+          // Ensure the job dir exists even if the user hasn't clicked Analyze.
+          await post("/api/start", metadata);
+          const r = await post("/api/mark", { metadata, timestamp_s: ts, image_b64 });
+          setStatus(`marked frame @ ${ts.toFixed(1)}s ✓ (${r.total_marks} total on disk)`);
+          sendResponse({ ok: true, timestamp_s: ts, total: r.total_marks });
         } catch (e) {
-          sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+          const msg = String(e && e.message ? e.message : e);
+          setStatus("mark failed: " + msg);
+          sendResponse({ ok: false, error: msg });
         }
       })();
       return true;
