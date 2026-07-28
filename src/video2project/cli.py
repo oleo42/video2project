@@ -316,6 +316,41 @@ def cmd_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Re-run the server-side pipeline from disk when the extension can't.
+
+    Reads audio.webm + capture_metadata.json from the per-video directory
+    and calls ingest_audio() in-process. Cache hits (same audio sha256)
+    skip Whisper entirely; misses re-transcribe. Prints next steps.
+    """
+    import base64
+
+    from . import capture, paths
+
+    platform, video_id = _split_video_id(args.video_id)
+    video_dir = paths.video_dir(platform, video_id)
+    audio_path = video_dir / "audio.webm"
+    meta_path = video_dir / "capture_metadata.json"
+    if not audio_path.exists():
+        print(f"[FAIL] no audio.webm at {audio_path}", file=sys.stderr)
+        return 1
+    if not meta_path.exists():
+        print(f"[FAIL] no capture_metadata.json at {meta_path}", file=sys.stderr)
+        return 1
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    audio_b64 = base64.b64encode(audio_path.read_bytes()).decode("ascii")
+    print(f"[..] transcribing (or reusing cache) for {video_id}...")
+    result = capture.ingest_audio(metadata, audio_b64)
+    tag = "cached" if result.get("cached") else "fresh"
+    print(
+        f"[OK] {tag}: {result['n_segments']} segments, "
+        f"{len(result['timestamps'])} timestamps"
+    )
+    print("     next: open the extension on the YouTube tab and click Resume,")
+    print("     or POST /api/frames with the frames array manually.")
+    return 0
+
+
 # ── helpers ────────────────────────────────────────────────────────
 
 
@@ -378,6 +413,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", type=int, default=8765)
     sp.set_defaults(func=cmd_capture)
 
+    # `resume` — re-run server-side transcribe/frame pipeline from disk
+    sp = sub.add_parser(
+        "resume",
+        help="Re-run transcription for a video whose audio.webm is on disk "
+        "(cache-aware: reuses transcript.json if audio unchanged)",
+    )
+    sp.add_argument("video_id", help="e.g. youtube__GYMyDFwNULk")
+    sp.set_defaults(func=cmd_resume)
+
     return p
 
 
@@ -396,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             "list",
             "doctor",
             "capture",
+            "resume",
         }:
             pass
         else:

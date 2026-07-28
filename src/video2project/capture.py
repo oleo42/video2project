@@ -21,6 +21,7 @@ the browser does; we only ever call the existing Ark text-LLM during extract.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -67,26 +68,52 @@ def ingest_audio(metadata: dict[str, Any], audio_b64: str) -> dict[str, Any]:
 
     The extension calls this after Pass-1 audio capture; the returned
     ``timestamps`` drive Pass-2 frame capture.
+
+    **Idempotent**: if the same audio (by sha256) was already transcribed for
+    this video, returns the cached timestamps without re-running Whisper.
     """
     platform = metadata.get("platform", "youtube")
     video_id = metadata["video_id"]
     paths.ensure_dirs(platform, video_id)
     video_dir = paths.video_dir(platform, video_id)
 
+    audio_bytes = _b64_to_bytes(audio_b64)
+    audio_sha = hashlib.sha256(audio_bytes).hexdigest()
+
+    transcript_path = paths.transcript_json(platform, video_id)
+    pending_ts_path = video_dir / _PENDING_TS
+    if transcript_path.exists() and pending_ts_path.exists():
+        try:
+            cached = json.loads(transcript_path.read_text(encoding="utf-8"))
+            if cached.get("audio_sha256") == audio_sha:
+                timestamps = json.loads(
+                    pending_ts_path.read_text(encoding="utf-8")
+                ).get("timestamps", [])
+                return {
+                    "video_id": video_id,
+                    "n_segments": len(cached.get("segments", [])),
+                    "timestamps": timestamps,
+                    "cached": True,
+                }
+        except (json.JSONDecodeError, OSError):
+            pass  # fall through to re-transcribe
+
     audio_path = video_dir / _AUDIO_NAME
-    audio_path.write_bytes(_b64_to_bytes(audio_b64))
+    audio_path.write_bytes(audio_bytes)
 
     transcript = transcribe_audio(audio_path, metadata=metadata)
-    _save_json(paths.transcript_json(platform, video_id), transcript)
+    transcript["audio_sha256"] = audio_sha
+    _save_json(transcript_path, transcript)
 
     duration_s = float(metadata.get("duration_s") or transcript.get("duration_s") or 0)
     timestamps = _pick_candidate_timestamps(transcript, duration_s)
-    _save_json(video_dir / _PENDING_TS, {"timestamps": timestamps})
+    _save_json(pending_ts_path, {"timestamps": timestamps})
 
     return {
         "video_id": video_id,
         "n_segments": len(transcript.get("segments", [])),
         "timestamps": timestamps,
+        "cached": False,
     }
 
 
