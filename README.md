@@ -1,5 +1,8 @@
 # video2project
 
+[![ci](https://github.com/oleo42/video2project/actions/workflows/ci.yml/badge.svg)](https://github.com/oleo42/video2project/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Paste a YouTube URL, get back a verified markdown + JSON knowledge artifact per video: timestamped key-frame notes, transcript, and LLM-cited claims (3 sources each, ⚠️ unverified tagged where the model had to fall back to its own training data).
 
 ## Install
@@ -66,4 +69,21 @@ Default: `~/Documents/video2project/`. Override with `VIDEO2PROJECT_HOME`.
 - Source check only (logic/math check in v2)
 - Smoke test uses fixtures, not live network
 
-See `docs/PLAN.md` (from the grilling session) for the full decision log.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the stage contracts,
+artifact shapes, and resumability model.
+
+## Reusing this
+
+The three stages communicate only through on-disk artifacts, so you can swap
+any one of them: point `extract` at a different LLM by editing `client.py`,
+or feed `finalize` your own `claims.json`. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and stage invariants.
+
+## License
+
+[MIT](LICENSE).
+
+Note on dependencies: this project calls `ffmpeg` and `yt-dlp` as external
+subprocesses rather than linking them, so their licenses do not propagate
+here. If you redistribute a bundle that ships ffmpeg binaries, check the
+build flags of the ffmpeg you bundle — some are GPL-configured.
